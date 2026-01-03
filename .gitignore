@@ -12,6 +12,7 @@ wheels/
 # data
 *.parquet
 *.pkl
+data/raw_datasets/
 
 # Apple System files
 .DS_Store
