@@ -148,14 +148,11 @@ class ClassDistributionAnalyzer:
     def compute_distribution(self) -> pl.DataFrame:
         """
         Calculates the count and percentage of each activity class.
-        Returns a sorted DataFrame.
         """
         activity_map = self._get_activity_map()
 
-        # Activity count
         counts = self.df.group_by("activity").count()
         
-        # Total frames
         total_frames = self.df.height
         
         dist_df = (
