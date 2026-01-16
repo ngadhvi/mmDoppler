@@ -188,3 +188,90 @@ class ClassDistributionAnalyzer:
         fig.update_layout(showlegend=False)
         
         return fig
+
+    def compute_duration_stats(self, fps: float = 2.0) -> pl.DataFrame:
+        """
+        Calculates duration statistics for each activity based on continuous segments.
+        Handles time gaps to distinguish separate events even if activity ID matches.
+        
+        Args:
+            fps (float): Frames per second (sampling rate). Default is 2.0 used for Micro-Activities.
+            
+        Returns:
+            pl.DataFrame: DataFrame containing activity name and duration statistics (median, p10, min, max).
+        """
+        activity_map = self._get_activity_map()
+        
+        # Expected max gap between frames for a continuous segment
+        max_gap_sec = (1.0 / fps) * 2.0
+        
+        if "datetime" not in self.df.columns:
+            # Fallback if no datetime column: just use activity changes
+            print("[Warning] No 'datetime' column found. Falling back to activity-change segmentation only.")
+            segments = (
+                self.df
+                .with_columns(
+                    (pl.col("activity") != pl.col("activity").shift(1).fill_null(pl.col("activity").first()))
+                    .cum_sum()
+                    .alias("segment_id")
+                )
+            )
+        else:
+            segments = (
+                self.df
+                # Do NOT sort by datetime to preserve file/user concatenation order
+                .with_columns([
+                    # Check activity change
+                    (pl.col("activity") != pl.col("activity").shift(1)).fill_null(False).alias("act_changed"),
+                    
+                    # Check time gap (current - prev)
+                    pl.col("datetime").diff().dt.total_seconds().fill_null(0).alias("time_diff")
+                ])
+                .with_columns(
+                    # New segment trigger if:
+                    # 1. Activity changed or,
+                    # 2. Huge time gap (gap > 1s)
+                    # 3. Time went backwards (diff < 0), implying new file/user
+                    ((pl.col("act_changed")) | (pl.col("time_diff") > max_gap_sec) | (pl.col("time_diff") < 0))
+                    .cum_sum()
+                    .alias("segment_id")
+                )
+            )
+        
+        # Group by segment ID to get the length (number of frames)
+        segment_durations = (
+            segments
+            .group_by(["segment_id", "activity"])
+            .agg(
+                (pl.count().cast(pl.Float64) / fps).alias("duration_sec")
+            )
+        )
+
+        # Compute statistics per activity
+        stats_df = (
+            segment_durations
+            .group_by("activity")
+            .agg([
+                pl.count().alias("num_segments"),
+                pl.col("duration_sec").median().alias("median_duration"),
+                pl.col("duration_sec").quantile(0.10).alias("p10_duration"),
+                pl.col("duration_sec").quantile(0.90).alias("p90_duration"),
+                pl.col("duration_sec").min().alias("min_duration"),
+                pl.col("duration_sec").max().alias("max_duration"),
+            ])
+            .with_columns(
+                pl.col("activity").map_elements(lambda x: activity_map.get(x, f"Unknown ({x})"), return_dtype=pl.Utf8).alias("Activity Name")
+            )
+            .sort("median_duration", descending=True)
+            .select([
+                "Activity Name", 
+                "num_segments", 
+                "median_duration", 
+                "p10_duration", 
+                "p90_duration", 
+                "min_duration", 
+                "max_duration"
+            ])
+        )
+        
+        return stats_df
